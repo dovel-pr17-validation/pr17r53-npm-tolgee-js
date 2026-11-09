@@ -1,0 +1,188 @@
+import { AlertTitle, Box } from '@mui/material';
+import { HttpError } from '../../client/HttpError';
+import { DocsInContext } from './DocsInContext';
+import { OpenExtension } from './OpenExtension';
+import { DocsAPIKeys } from './DocsAPIKeys';
+import { CredentialHint } from './CredentialHint';
+
+type CredentialContext = {
+  credentialBlocksSubmit: boolean | undefined;
+  accountHolds: (scopes: string[]) => boolean | undefined;
+  viaExtension: boolean;
+};
+
+export function getErrorContent(
+  { code, params, message }: HttpError,
+  apiUrl: string,
+  credential: CredentialContext
+) {
+  switch (code) {
+    case 'operation_not_permitted': {
+      const missing = params ?? [];
+      return (
+        <>
+          <AlertTitle>Operation not permitted</AlertTitle>
+          {missing.length > 0 && (
+            <>
+              {'Missing scopes: ' + missing.join(', ')}
+              {credential.accountHolds(missing) && (
+                <Box mt={1}>
+                  <CredentialHint viaExtension={credential.viaExtension} />
+                </Box>
+              )}
+            </>
+          )}
+        </>
+      );
+    }
+
+    case 'invalid_project_api_key':
+      return (
+        <>
+          <AlertTitle>Invalid API key</AlertTitle>
+          Check it in the code or in the chrome plugin. <DocsInContext />
+        </>
+      );
+
+    case 'unauthenticated':
+    case 'invalid_jwt_token':
+    case 'expired_jwt_token':
+    case 'general_jwt_error':
+    case 'invalid_oauth_token':
+    case 'oauth_token_expired':
+    case 'extension_session_missing':
+      return (
+        <>
+          <AlertTitle>You're not signed in</AlertTitle>
+          Sign in again in the Tolgee plugin to keep editing. <OpenExtension />
+        </>
+      );
+
+    case 'extension_request_too_large':
+      return (
+        <>
+          <AlertTitle>Image is too large to upload</AlertTitle>
+          This image is too large for the Tolgee plugin to send. Pick a smaller
+          one.
+        </>
+      );
+
+    case 'api_url_not_specified':
+      return (
+        <>
+          <AlertTitle>Oops... I miss the API url</AlertTitle>
+          Add it in the code or via the chrome plugin. <DocsInContext />
+        </>
+      );
+
+    case 'api_url_not_valid':
+      return (
+        <>
+          <AlertTitle>API url is not correct ({apiUrl})</AlertTitle>
+          Check it in the code or in the chrome plugin. <DocsInContext />
+        </>
+      );
+
+    case 'suggestion_needs_existing_key':
+      return (
+        <>
+          <AlertTitle>This string has no key in Tolgee yet</AlertTitle>
+          Suggestions need an existing key. Ask someone who can create keys to
+          add it first. <DocsInContext />
+        </>
+      );
+
+    case 'api_key_not_specified':
+      return (
+        <>
+          <AlertTitle>Sign in to make changes</AlertTitle>
+          To edit strings here, sign in with the Tolgee browser extension or add
+          an API key to the Tolgee configuration. <DocsInContext />
+          <OpenExtension />
+        </>
+      );
+
+    case 'extension_editing_off':
+      return (
+        <>
+          <AlertTitle>In-context editing is switched off</AlertTitle>
+          You switched editing off for this page in the Tolgee plugin. Turn it
+          on to edit here. <OpenExtension />
+        </>
+      );
+
+    case 'project_id_not_specified':
+      return (
+        <>
+          <AlertTitle>Oops... I miss the project id</AlertTitle>
+          An OAuth token or PAT carries no project, so projectId must be set in
+          the Tolgee configuration. <DocsInContext />
+        </>
+      );
+
+    case 'project_not_found':
+      return (
+        <>
+          <AlertTitle>Project not found</AlertTitle>
+          The configured project doesn't exist on this server, or your account
+          can't access it. Check the projectId in the Tolgee configuration, or
+          ask for access. <DocsInContext />
+        </>
+      );
+
+    case 'permissions_not_sufficient_to_edit': {
+      const limit = credential.credentialBlocksSubmit;
+      return (
+        <>
+          <AlertTitle>
+            Sorry, you don't have permissions to make changes
+          </AlertTitle>
+          {limit === true ? (
+            <CredentialHint viaExtension={credential.viaExtension} />
+          ) : limit === false ? (
+            'Ask a project admin for more permissions.'
+          ) : (
+            <>
+              Update your API key or ask admin for more permissions{' '}
+              <DocsAPIKeys />
+            </>
+          )}
+        </>
+      );
+    }
+
+    case 'operation_not_permitted_in_read_only_mode':
+      return (
+        <>
+          <AlertTitle>Read-only mode</AlertTitle>
+          This branch is protected or your access is read-only.
+        </>
+      );
+
+    case 'duplicate_suggestion':
+      return <>This suggestion already exists.</>;
+
+    case 'suggestions_disabled':
+      return (
+        <>
+          <AlertTitle>Suggestions are disabled</AlertTitle>
+          This project doesn't accept suggestions any more. Reopen the dialog to
+          see what you can still do.
+        </>
+      );
+
+    case 'branch_not_found':
+      return (
+        <>
+          <AlertTitle>Branch not found</AlertTitle>
+          Check the branch name or switch to an existing branch.
+        </>
+      );
+
+    case 'fetch_error':
+      return `Failed to fetch (${apiUrl})`;
+
+    default:
+      return message;
+  }
+}

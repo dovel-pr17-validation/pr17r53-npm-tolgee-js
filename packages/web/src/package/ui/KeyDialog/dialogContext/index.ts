@@ -1,0 +1,789 @@
+import { useEffect, useMemo, useState } from 'react';
+import { UiProps } from '@tolgee/core';
+import {
+  TolgeeFormat,
+  getTolgeeFormat,
+  getTolgeePlurals,
+  tolgeeFormatGenerateIcu,
+} from '@tginternal/editor';
+
+import { getVisibleCharCount } from '../editor/getVisibleCharCount';
+import { sleep } from '../../tools/sleep';
+import { createProvider } from '../../tools/createProvider';
+import { putBaseLangFirst, putBaseLangFirstTags } from '../languageHelpers';
+import { useQueryClient } from 'react-query';
+import {
+  invalidateUrlPrefix,
+  useApiMutation,
+  useApiQuery,
+} from '../../client/useQueryApi';
+import {
+  changeInTolgeeCache,
+  deriveFieldStates,
+  editedLanguages,
+  getInitialLanguages,
+  getPreferredLanguages,
+  mapPosition,
+  permissionsQueryProjectId,
+  sameTranslation,
+  isSuggestOnly,
+  keepFormFields,
+  keyUpdateCarriesOtherChanges,
+  planSubmit,
+  statesToUpdate,
+  setPreferredLanguages,
+  SubmitKind,
+  SUGGESTIONS_URL,
+} from './tools';
+import { useGallery } from './useGallery';
+import { checkPlatformVersion } from '../../tools/checkPlatformVersion';
+import { limitSurroundingKeys } from '../../tools/limitSurroundingKeys';
+import { StateType } from '../State/translationStates';
+import { useComputedPermissions } from './usePermissions';
+import { HttpError, isHttpError } from '../../client/HttpError';
+import { components } from '../../client/apiSchema.generated';
+import { isTranslationEmpty } from '../../tools/isTranslationEmpty';
+import { resolveLiveCredential } from '../../../tools/auth';
+
+const MINIMAL_PLATFORM_VERSION = 'v3.42.0';
+
+type LanguageModel = components['schemas']['LanguageModel'];
+
+type FormTranslations = {
+  [key: string]: {
+    value: TolgeeFormat;
+    state: StateType;
+  };
+};
+
+type DialogProps = {
+  keyName: string;
+  defaultValue: string;
+  onClose: () => void;
+  uiProps: UiProps;
+  fallbackNamespaces: string[];
+  namespace: string;
+  children: React.ReactNode;
+};
+
+export const [DialogProvider, useDialogActions, useDialogContext] =
+  createProvider((props: DialogProps) => {
+    const [success, setSuccess] = useState<SubmitKind | false>(false);
+    const [translationsForm, _setTranslationsForm] = useState<FormTranslations>(
+      {}
+    );
+
+    function setTranslation(language: string, value: TolgeeFormat) {
+      _setTranslationsForm((val) => ({
+        ...val,
+        [language]: {
+          ...val[language],
+          value,
+        },
+      }));
+    }
+
+    function setState(language: string, state: StateType) {
+      _setTranslationsForm((value) => ({
+        ...value,
+        [language]: {
+          ...value[language],
+          state,
+        },
+      }));
+    }
+
+    const [saving, setSaving] = useState(false);
+
+    const [selectedNs, setSelectedNs] = useState<string>(props.namespace);
+    const [tags, setTags] = useState<string[] | undefined>(undefined);
+    const [_isPlural, setIsPlural] = useState<boolean>();
+    const [_pluralArgName, setPluralArgName] = useState<string>();
+    const [_maxCharLimit, setMaxCharLimit] = useState<number | undefined>();
+    const [submitError, setSubmitError] = useState<HttpError>();
+    const [suggestionErrors, setSuggestionErrors] = useState<
+      Record<string, HttpError>
+    >({});
+    const [refreshing, setRefreshing] = useState(false);
+    const queryClient = useQueryClient();
+    const [readOnly, setReadOnly] = useState(false);
+    const branchParam = props.uiProps.branch;
+
+    const filterTagMissing =
+      Boolean(props.uiProps.filterTag?.length) &&
+      tags &&
+      !props.uiProps.filterTag.find((t) => tags.includes(t));
+    useEffect(() => {
+      // reset when key changes
+      setIsPlural(undefined);
+      setPluralArgName(undefined);
+      setReadOnly(false);
+    }, [props.keyName, props.namespace, props.uiProps.branch]);
+
+    const {
+      screenshots,
+      setScreenshots,
+      screenshotDetail,
+      setScreenshotDetail,
+      screenshotsUploading,
+      takingScreenshot,
+      handleRemoveScreenshot,
+      handleUploadImages,
+      deleteImages,
+      canTakeScreenshots,
+      error: galleryError,
+      ...galleryProps
+    } = useGallery(props.uiProps);
+
+    const scopesLoadable = useApiQuery({
+      url: '/v2/api-keys/current-permissions',
+      method: 'get',
+      query: {
+        projectId: permissionsQueryProjectId(props.uiProps),
+      },
+    });
+
+    const canModifyProtectedBranch = scopesLoadable.data?.scopes?.includes(
+      'branch.protected-modify'
+    );
+
+    const icuPlaceholders = scopesLoadable.data?.project?.icuPlaceholders;
+    const pluralsSupported = icuPlaceholders !== undefined;
+
+    const languagesLoadable = useApiQuery({
+      url: '/v2/projects/languages',
+      method: 'get',
+      query: {
+        size: 1000,
+      },
+      options: {
+        onSuccess(data) {
+          const languages = data._embedded?.languages;
+          const baseTag = languages?.find((l) => l.base)?.tag;
+          const selectedLanguages = getInitialLanguages(
+            languages?.map((l) => l.tag!) || [],
+            baseTag
+          );
+          initializeWithDefaultValue(undefined, data._embedded?.languages);
+          setSelectedLanguages(selectedLanguages);
+          setPreferredLanguages(selectedLanguages);
+        },
+      },
+    });
+
+    const createKey = useApiMutation({
+      url: '/v2/projects/keys/create',
+      method: 'post',
+    });
+
+    const availableLanguages = useMemo(() => {
+      return putBaseLangFirst(languagesLoadable.data?._embedded?.languages);
+    }, [languagesLoadable.data]);
+
+    const [selectedLanguages, setSelectedLanguages] = useState<string[]>(
+      getPreferredLanguages()
+    );
+
+    const translationsLoadable = useApiQuery({
+      url: '/v2/projects/translations',
+      method: 'get',
+      query: {
+        filterKeyName: [props.keyName],
+        filterNamespace: [selectedNs],
+        languages: selectedLanguages,
+        branch: branchParam,
+      },
+      options: {
+        enabled: Boolean(scopesLoadable.data),
+        keepPreviousData: true,
+        onSuccess(data) {
+          const result: FormTranslations = {};
+          const keyData = data._embedded?.keys?.[0];
+          if (keyData) {
+            const isPlural = Boolean(keyData.keyIsPlural);
+            data.selectedLanguages?.forEach((lang) => {
+              const translation = keyData?.translations[lang.tag];
+              result[lang.tag] = {
+                value: getTolgeeFormat(
+                  translation?.text || '',
+                  isPlural,
+                  !icuPlaceholders
+                ),
+                state: translation?.state || 'UNTRANSLATED',
+              };
+            });
+            if (_pluralArgName === undefined && isPlural) {
+              setPluralArgName(keyData?.keyPluralArgName);
+            }
+          } else if (props.defaultValue) {
+            const parsed = getTolgeePlurals(
+              props.defaultValue,
+              !icuPlaceholders
+            );
+            setIsPlural(Boolean(parsed.parameter));
+            setPluralArgName(parsed.parameter);
+          }
+          initializeWithDefaultValue(result, undefined);
+          if (keyData) {
+            setTags(keyData?.keyTags?.map((t) => t.name) || []);
+          } else {
+            setTags([
+              ...(props.uiProps.filterTag ?? []),
+              ...(props.uiProps.tagNewKeys ?? []),
+            ]);
+          }
+          setScreenshots(
+            keyData?.screenshots?.map((sc) => ({
+              ...sc,
+              filename: sc.filename!,
+              justUploaded: false,
+            })) || []
+          );
+        },
+      },
+    });
+
+    function initializeWithDefaultValue(
+      translationData: FormTranslations | undefined,
+      languagesData: LanguageModel[] | undefined
+    ) {
+      const data =
+        translationData ??
+        (translationsLoadable.isSuccess ? undefined : translationsForm);
+      const languages =
+        languagesData ?? languagesLoadable.data?._embedded?.languages;
+
+      if (!data) {
+        return undefined;
+      }
+
+      if (!languages) {
+        _setTranslationsForm({
+          ...data,
+        });
+        return undefined;
+      }
+
+      const baseLang = languages.find((l) => l.base);
+      if (!baseLang?.tag) {
+        return undefined;
+      }
+      const baseLangIncluded = selectedLanguages.includes(baseLang.tag);
+      const baseValueEmpty = isTranslationEmpty(
+        data?.[baseLang.tag]?.value,
+        isPlural
+      );
+
+      if (data && baseLangIncluded && baseValueEmpty && props.defaultValue) {
+        _setTranslationsForm({
+          ...data,
+          [baseLang.tag]: {
+            state: data?.[baseLang.tag]?.state ?? 'UNTRANSLATED',
+            value: getTolgeePlurals(props.defaultValue, !icuPlaceholders),
+          },
+        });
+      } else {
+        _setTranslationsForm({
+          ...data,
+        });
+      }
+    }
+
+    // When branchParam is undefined, fetches default branch info
+    const branchLoadable = useApiQuery({
+      url: '/v2/projects/branches/find',
+      method: 'get',
+      query: {
+        name: branchParam,
+      },
+      options: {
+        retry: false,
+      },
+    });
+
+    useEffect(() => {
+      if (
+        branchLoadable.data?.isProtected &&
+        canModifyProtectedBranch === false
+      ) {
+        setReadOnly(true);
+      }
+    }, [branchLoadable.data?.isProtected, canModifyProtectedBranch]);
+
+    const keyData = translationsLoadable.data?._embedded?.keys?.[0];
+    const isPlural =
+      _isPlural !== undefined ? _isPlural : Boolean(keyData?.keyIsPlural);
+    const pluralArgName = isPlural ? _pluralArgName || 'value' : undefined;
+
+    const keyExists = Boolean(
+      translationsLoadable.data?._embedded?.keys?.length
+    );
+
+    const permissions = useComputedPermissions(
+      scopesLoadable.data,
+      translationsLoadable?.data?._embedded?.keys?.[0],
+      languagesLoadable.data?._embedded?.languages
+    );
+
+    const updateKey = useApiMutation({
+      url: '/v2/projects/keys/{id}/complex-update',
+      method: 'put',
+    });
+
+    const createSuggestion = useApiMutation({
+      url: SUGGESTIONS_URL,
+      method: 'post',
+    });
+
+    const linkToPlatform =
+      scopesLoadable.data?.projectId !== undefined
+        ? `${props.uiProps.apiUrl}/projects/${
+            scopesLoadable.data.projectId
+          }/translations/single${
+            branchParam ? `/tree/${encodeURIComponent(branchParam)}` : ''
+          }?key=${encodeURIComponent(props.keyName)}${
+            selectedNs ? `&ns=${encodeURIComponent(selectedNs)}` : ''
+          }`
+        : undefined;
+
+    const [container, setContainer] = useState(
+      undefined as Element | undefined
+    );
+    const [useBrowserWindow, setUseBrowserWindow] = useState(false);
+
+    function onInputChange(key: string, value: TolgeeFormat) {
+      // the editor also reports a change when a re-seed replaces its value
+      if (sameTranslation(value, translationsForm[key]?.value)) {
+        return;
+      }
+      setSubmitError(undefined);
+      setSuggestionErrors(({ [key]: _, ...rest }) => rest);
+      setSuccess(false);
+      setTranslation(key, value);
+    }
+
+    function onStateChange(key: string, value: StateType) {
+      setSuccess(false);
+      setState(key, value);
+    }
+
+    async function onSubmit() {
+      setSaving(true);
+      setSuggestionErrors({});
+      try {
+        const newTranslations = Object.fromEntries(
+          submitPlan.toSave.map((language) => [
+            language,
+            toIcu(translationsForm[language].value),
+          ])
+        );
+
+        const relatedKeysInOrder = permissions.canSendBigMeta
+          ? limitSurroundingKeys(props.uiProps.findPositions(), {
+              keyName: props.keyName,
+              keyNamespace: selectedNs,
+            })
+          : undefined;
+
+        if (!suggestOnly) {
+          await (keyData === undefined
+            ? createKey.mutateAsync({
+                content: {
+                  'application/json': {
+                    name: props.keyName,
+                    branch: branchParam,
+                    namespace: selectedNs || undefined,
+                    translations: newTranslations,
+                    states: newStates,
+                    screenshots: screenshots.map((sc) => ({
+                      uploadedImageId: sc.id,
+                      positions: sc.keyReferences?.map(mapPosition),
+                    })),
+                    tags,
+                    relatedKeysInOrder,
+                    isPlural,
+                    pluralArgName,
+                    maxCharLimit: maxCharLimit ?? null,
+                  },
+                },
+              })
+            : updateKey.mutateAsync({
+                content: {
+                  'application/json': {
+                    name: props.keyName,
+                    branch: branchParam,
+                    namespace: selectedNs || undefined,
+                    translations: newTranslations,
+                    states: newStates,
+                    screenshotIdsToDelete: getRemovedScreenshots(),
+                    screenshotsToAdd: getJustUploadedScreenshots().map(
+                      (sc) => ({
+                        uploadedImageId: sc.id,
+                        positions: sc.keyReferences?.map(mapPosition),
+                      })
+                    ),
+                    tags,
+                    relatedKeysInOrder,
+                    isPlural,
+                    pluralArgName,
+                    maxCharLimit: maxCharLimit ?? 0,
+                  },
+                },
+                path: { id: keyData.keyId! },
+              }));
+
+          commitToPage(Object.entries(newTranslations));
+        }
+
+        const failed = await sendSuggestions(submitPlan.toSuggest);
+        const failedLanguages = Object.keys(failed);
+        setSuggestionErrors(failed);
+        await refetchKeeping({
+          keepLanguages: failedLanguages,
+          keepTagsAndScreenshots: false,
+        });
+        if (failedLanguages.length) {
+          return;
+        }
+        setSaving(false);
+        setSuccess(submitPlan.kind);
+        if (useBrowserWindow) {
+          await sleep(2000);
+          setSuccess(false);
+        } else {
+          await sleep(400);
+          props.onClose();
+        }
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.error(e);
+        if (
+          isHttpError(e) &&
+          e.code === 'operation_not_permitted_in_read_only_mode'
+        ) {
+          setReadOnly(true);
+        } else {
+          setSubmitError(e);
+        }
+      } finally {
+        setSaving(false);
+        setSuccess(false);
+      }
+    }
+
+    function commitToPage(translations: [string, string][]) {
+      changeInTolgeeCache(
+        props.keyName,
+        selectedNs,
+        translations,
+        props.uiProps.changeTranslation
+      );
+      props.uiProps.onPermanentChange({
+        key: props.keyName,
+        namespace: selectedNs,
+      });
+    }
+
+    async function sendSuggestions(languages: string[]) {
+      const failed: Record<string, HttpError> = {};
+      await Promise.all(
+        languages.map((language) =>
+          createSuggestion
+            .mutateAsync({
+              path: {
+                languageId: availableLanguages!.find((l) => l.tag === language)!
+                  .id,
+                keyId: keyData!.keyId!,
+              },
+              content: {
+                'application/json': {
+                  translation: toIcu(translationsForm[language].value),
+                },
+              },
+            })
+            .catch((error: HttpError) => {
+              failed[language] = error;
+            })
+        )
+      );
+      const anySent = Object.keys(failed).length < languages.length;
+      if (anySent) {
+        invalidateUrlPrefix(queryClient, SUGGESTIONS_URL);
+      }
+      return failed;
+    }
+
+    // Relies on react-query (v3) running the query's onSuccess, which re-seeds the whole form, before the awaited
+    // refetch() continues; what is restored here would otherwise be overwritten.
+    async function refetchKeeping({
+      keepLanguages,
+      keepTagsAndScreenshots,
+    }: {
+      keepLanguages: string[];
+      keepTagsAndScreenshots: boolean;
+    }) {
+      const form = translationsForm;
+      const unsavedTags = tags;
+      const unsavedScreenshots = screenshots;
+      setRefreshing(true);
+      try {
+        await translationsLoadable.refetch();
+        _setTranslationsForm((fetched) =>
+          keepFormFields(fetched, form, keepLanguages)
+        );
+        if (keepTagsAndScreenshots) {
+          setTags(unsavedTags);
+          setScreenshots(unsavedScreenshots);
+        }
+      } finally {
+        setRefreshing(false);
+      }
+    }
+
+    function reloadKeepingEdits({ except }: { except?: string } = {}) {
+      return refetchKeeping({
+        keepLanguages: edited.filter((l) => l !== except),
+        keepTagsAndScreenshots: true,
+      });
+    }
+
+    function toIcu(value: TolgeeFormat) {
+      return tolgeeFormatGenerateIcu(
+        { ...value, parameter: pluralArgName },
+        !icuPlaceholders
+      );
+    }
+
+    function onClose() {
+      if (screenshotDetail) {
+        setScreenshotDetail(null);
+      } else {
+        props.onClose();
+        setUseBrowserWindow(false);
+        const uploadedScreenshots = getJustUploadedScreenshots();
+        if (uploadedScreenshots.length) {
+          deleteImages(uploadedScreenshots.map((sc) => sc.id!));
+        }
+        setScreenshots([]);
+      }
+    }
+
+    useEffect(() => {
+      setSuggestionErrors({});
+    }, [selectedLanguages, selectedNs]);
+
+    function onSelectedLanguagesChange(languages: string[]) {
+      if (languages.length) {
+        setSelectedLanguages(languages);
+        setPreferredLanguages(languages);
+      }
+    }
+
+    useEffect(() => {
+      const onKeyDown = (e: any) => {
+        if (e.key === 'Escape') {
+          onClose();
+        }
+      };
+      if (!useBrowserWindow) {
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+          window.removeEventListener('keydown', onKeyDown);
+        };
+      }
+    }, [useBrowserWindow]);
+
+    const getJustUploadedScreenshots = () => {
+      return screenshots.filter((sc) => sc.justUploaded);
+    };
+
+    const getRemovedScreenshots = () => {
+      return (
+        keyData?.screenshots
+          ?.map((sc) => sc.id)
+          .filter((scId) => !screenshots.find((sc) => sc.id === scId)) || []
+      );
+    };
+
+    function handleTakeScreenshot() {
+      galleryProps.handleTakeScreenshot(
+        props.keyName,
+        selectedNs,
+        Object.entries(translationsForm).map(
+          ([language, value]) =>
+            [language, toIcu(value.value)] as [string, string]
+        )
+      );
+    }
+
+    const versionError = checkPlatformVersion(
+      MINIMAL_PLATFORM_VERSION,
+      translationsLoadable.data?._internal?.version
+    );
+
+    const baseLang = availableLanguages?.find(({ base }) => base);
+    const loading =
+      languagesLoadable.isFetching ||
+      (translationsLoadable.isLoading && !translationsLoadable.data) ||
+      scopesLoadable.isFetching;
+    const error =
+      versionError ||
+      languagesLoadable.error ||
+      translationsLoadable.error ||
+      scopesLoadable.error ||
+      createKey.error ||
+      updateKey.error ||
+      galleryError;
+
+    const maxCharLimit =
+      _maxCharLimit !== undefined ? _maxCharLimit : keyData?.keyMaxCharLimit;
+    const charLimit = maxCharLimit;
+    const isOverCharLimit = useMemo(() => {
+      if (charLimit == null || charLimit <= 0) return false;
+      return Object.values(translationsForm).some((entry) => {
+        const variants = entry.value?.variants;
+        if (!variants) return false;
+        return Object.entries(variants).some(
+          ([variant, text]) =>
+            getVisibleCharCount({ text, nested: variant !== 'other' }) >
+            charLimit
+        );
+      });
+    }, [translationsForm, charLimit]);
+
+    const formDisabled = loading || !permissions.canSubmitForm || readOnly;
+
+    const suggestOnly = isSuggestOnly(
+      permissions,
+      availableLanguages?.map((l) => l.tag) ?? []
+    );
+
+    const { dispositions, credentialBlocksField } = deriveFieldStates({
+      languages: selectedLanguages,
+      states: Object.fromEntries(
+        selectedLanguages.map((language) => [
+          language,
+          keyData?.translations?.[language]?.state,
+        ])
+      ),
+      formDisabled,
+      getDisposition: permissions.getDisposition,
+      credentialBlocksTranslation: permissions.credentialBlocksTranslation,
+    });
+
+    const serverValue = (language: string) =>
+      getTolgeeFormat(
+        keyData?.translations?.[language]?.text || '',
+        isPlural,
+        !icuPlaceholders
+      );
+
+    const serverState = (language: string) =>
+      keyData?.translations?.[language]?.state || 'UNTRANSLATED';
+
+    const pluralChanged =
+      keyData !== undefined &&
+      (isPlural !== Boolean(keyData.keyIsPlural) ||
+        (isPlural && pluralArgName !== keyData.keyPluralArgName));
+
+    const fields = Object.entries(translationsForm).map(
+      ([language, { value, state }]) => ({
+        language,
+        state,
+        disposition: dispositions[language] ?? 'readonly',
+        changed: !sameTranslation(value, serverValue(language)),
+        stateChanged: state !== serverState(language),
+        isEmpty: isTranslationEmpty(value, isPlural),
+      })
+    );
+    const edited = editedLanguages(fields, pluralChanged);
+
+    const newStates = statesToUpdate(fields, permissions.canEditState);
+
+    const submitPlan = planSubmit({
+      fields,
+      suggestOnly,
+      pluralChanged,
+      otherKeyChanges:
+        keyData !== undefined &&
+        keyUpdateCarriesOtherChanges({
+          tags,
+          serverTags: keyData.keyTags?.map((t) => t.name) ?? [],
+          screenshotsAdded: getJustUploadedScreenshots().length,
+          screenshotsRemoved: getRemovedScreenshots().length,
+          maxCharLimit,
+          serverMaxCharLimit: keyData.keyMaxCharLimit,
+          pluralChanged,
+          states: newStates,
+        }),
+    });
+
+    const contextValue = {
+      input: props.keyName,
+      fallbackNamespaces: props.fallbackNamespaces,
+      uiProps: props.uiProps,
+      selectedNs,
+      loading,
+      saving,
+      success,
+      error,
+      availableLanguages,
+      selectedLanguages: putBaseLangFirstTags(selectedLanguages, baseLang?.tag),
+      formDisabled,
+      readOnly,
+      keyData,
+      translationsForm,
+      container,
+      useBrowserWindow,
+      takingScreenshot,
+      screenshotsUploading,
+      screenshots,
+      screenshotDetail,
+      linkToPlatform,
+      keyExists,
+      maxCharLimit,
+      tags: tags || [],
+      permissions,
+      canTakeScreenshots,
+      isPlural,
+      _pluralArgName,
+      pluralArgName,
+      pluralsSupported,
+      icuPlaceholders,
+      submitError,
+      suggestionErrors,
+      clearedSuggestFields: submitPlan.cleared,
+      busy: saving || refreshing,
+      dispositions,
+      credentialBlocksField,
+      viaExtension: resolveLiveCredential(props.uiProps).viaExtension,
+      suggestOnly,
+      submitKind: submitPlan.kind,
+      nothingToSuggest: suggestOnly && !submitPlan.toSuggest.length,
+      filterTagMissing,
+      isOverCharLimit,
+    } as const;
+
+    const actions = {
+      onInputChange,
+      onStateChange,
+      handleUploadImages,
+      handleTakeScreenshot,
+      handleRemoveScreenshot,
+      onSubmit,
+      commitToPage,
+      reloadKeepingEdits,
+      onClose,
+      onSelectedLanguagesChange,
+      setContainer,
+      setUseBrowserWindow,
+      setScreenshotDetail,
+      setSelectedNs,
+      setTags,
+      setIsPlural,
+      setPluralArgName,
+      setMaxCharLimit,
+    };
+
+    return [contextValue, actions];
+  });

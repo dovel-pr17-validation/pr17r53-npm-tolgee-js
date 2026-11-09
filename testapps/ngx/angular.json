@@ -1,0 +1,117 @@
+{
+  "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
+  "version": 1,
+  "newProjectRoot": "projects",
+  "cli": {
+    "packageManager": "pnpm",
+    "analytics": false
+  },
+  "projects": {
+    "sampleapp": {
+      "projectType": "application",
+      "schematics": {
+        "@schematics/angular:component": {
+          "style": "scss"
+        }
+      },
+      "root": "projects/sampleapp",
+      "sourceRoot": "projects/sampleapp/src",
+      "prefix": "app",
+      "architect": {
+        "build": {
+          "builder": "@angular/build:application",
+          "options": {
+            "outputPath": "dist/sampleapp",
+            "index": "projects/sampleapp/src/index.html",
+            "browser": "projects/sampleapp/src/main.ts",
+            "server": "projects/sampleapp/src/main.server.ts",
+            "prerender": {
+              "discoverRoutes": false,
+              "routesFile": "projects/sampleapp/routes.txt"
+            },
+            "polyfills": ["zone.js"],
+            "tsConfig": "projects/sampleapp/tsconfig.app.json",
+            "assets": [
+              "projects/sampleapp/src/favicon.ico",
+              "projects/sampleapp/src/assets"
+            ],
+            "styles": [
+              "projects/sampleapp/src/styles.scss"
+            ],
+            "scripts": []
+          },
+          "configurations": {
+            "production": {
+              "fileReplacements": [
+                {
+                  "replace": "projects/sampleapp/src/environments/environment.ts",
+                  "with": "projects/sampleapp/src/environments/environment.prod.ts"
+                }
+              ],
+              "optimization": true,
+              "outputHashing": "all",
+              "sourceMap": true,
+              "namedChunks": true,
+              "extractLicenses": true,
+              "budgets": [
+                {
+                  "type": "initial",
+                  "maximumWarning": "2mb",
+                  "maximumError": "5mb"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "6kb",
+                  "maximumError": "10kb"
+                }
+              ]
+            },
+            "stage": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true,
+              "namedChunks": true,
+              "fileReplacements": [
+                {
+                  "replace": "projects/sampleapp/src/environments/environment.ts",
+                  "with": "projects/sampleapp/src/environments/environment.stage.ts"
+                }
+              ]
+            },
+            "e2e": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true,
+              "namedChunks": true,
+              "server": false,
+              "prerender": false,
+              "fileReplacements": [
+                {
+                  "replace": "projects/sampleapp/src/environments/environment.ts",
+                  "with": "projects/sampleapp/src/environments/environment.e2e.ts"
+                }
+              ]
+            }
+          }
+        },
+        "serve": {
+          "builder": "@angular/build:dev-server",
+          "options": {
+            "buildTarget": "sampleapp:build"
+          },
+          "configurations": {
+            "production": {
+              "buildTarget": "sampleapp:build:production"
+            },
+            "stage": {
+              "buildTarget": "sampleapp:build:stage"
+            },
+            "e2e": {
+              "buildTarget": "sampleapp:build:e2e"
+            }
+          }
+        }
+      }
+    }
+  }
+}

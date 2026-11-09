@@ -1,0 +1,7 @@
+exclude:
+  global:
+    # exclude unit tests
+    - '**/*.spec.*'
+    - '**/*.test.*'
+    # exclude e2e tests
+    - '**/e2e/**'

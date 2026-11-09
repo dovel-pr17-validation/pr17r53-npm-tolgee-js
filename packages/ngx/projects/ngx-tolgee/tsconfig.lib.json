@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../out-tsc/lib",
+    "declarationMap": true,
+    "target": "ES2022",
+    "declaration": true,
+    "inlineSources": true,
+    "types": [],
+    "lib": ["DOM", "ES2022"]
+  },
+  "angularCompilerOptions": {
+    "strictTemplates": true,
+    "strictInjectionParameters": true,
+    "strictInputAccessModifiers": true,
+    "enableResourceInlining": true
+  },
+  "exclude": ["src/test.ts", "**/*.spec.ts", "src/__mocks/**"]
+}

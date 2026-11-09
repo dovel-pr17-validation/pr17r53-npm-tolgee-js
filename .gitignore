@@ -1,0 +1,11 @@
+node_modules
+*.iml
+**/package.json.lerna_backup
+**/.DS_Store
+**/.vscode
+.gradle
+.idea
+**/.turbo
+**/'.turbo'
+.pnpm-store
+.VERSION

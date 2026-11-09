@@ -1,0 +1,198 @@
+import { useMemo } from 'react';
+
+import { components } from '../../client/apiSchema.generated';
+import { isAuthorizedTo, isLanguagePermitted } from '../../tools/permissions';
+
+type ApiKeyPermissionsModel = components['schemas']['ApiKeyPermissionsModel'];
+type LanguageModel = components['schemas']['LanguageModel'];
+type KeyWithTranslationsModel =
+  components['schemas']['KeyWithTranslationsModel'];
+type TranslationState = components['schemas']['TranslationModel']['state'];
+
+export type Disposition = 'save' | 'suggest' | 'readonly';
+
+export const getComputedPermissions = (
+  permissions: ApiKeyPermissionsModel | undefined,
+  keyData: KeyWithTranslationsModel | undefined,
+  availableLanguages: LanguageModel[] | undefined
+) => {
+  const has = (scope: string) => isAuthorizedTo(scope, permissions?.scopes);
+  const keyExists = Boolean(keyData);
+
+  const canCreateKey = has('keys.create');
+
+  // if key doesn't exist and we don't have permission to create it's useless to change anything in the form
+  const keyCreationOk = keyExists || canCreateKey;
+
+  const canEditTranslations = has('translations.edit') && keyCreationOk;
+  const canEditStates = has('translations.state-edit') && keyCreationOk;
+  const canEditTags = has('keys.edit') && keyCreationOk;
+  const canEditPlural = has('keys.edit') && keyCreationOk;
+  const canEditCharLimit = has('keys.edit') && keyCreationOk;
+  const canViewScreenshots = has('screenshots.view');
+  const canUploadScreenshots = has('screenshots.upload') && keyCreationOk;
+  const canDeleteScreenshots = has('screenshots.delete') && keyCreationOk;
+  const canSendBigMeta = has('translations.edit');
+  const isAssignedToTranslation = keyData?.tasks?.find((i) => i?.userAssigned);
+
+  const getLanguageId = (language: string) => {
+    return availableLanguages?.find((l) => l.tag === language)?.id;
+  };
+
+  const hasForLanguage = (
+    scope: string,
+    language: string,
+    permittedLanguages: number[] | undefined
+  ) =>
+    has(scope) &&
+    isLanguagePermitted(getLanguageId(language), permittedLanguages);
+
+  const suggestionsEnabled = permissions?.suggestionsMode === 'ENABLED';
+  const reviewedProtected =
+    permissions?.translationProtection === 'PROTECT_REVIEWED';
+
+  const canSuggestTranslation = (language: string) =>
+    suggestionsEnabled &&
+    keyExists &&
+    hasForLanguage(
+      'translations.suggest',
+      language,
+      permissions?.suggestLanguageIds
+    );
+
+  const canSubmitForm =
+    canEditTranslations ||
+    canEditStates ||
+    canEditTags ||
+    canUploadScreenshots ||
+    canDeleteScreenshots ||
+    isAssignedToTranslation ||
+    availableLanguages?.some((l) => canSuggestTranslation(l.tag));
+
+  const assignedTaskType = (language: string) => {
+    const task = keyData?.tasks?.find((t) => t.languageTag === language);
+    return task?.userAssigned ? task.type : undefined;
+  };
+
+  const suggestionNeedsKey =
+    !keyExists &&
+    !canCreateKey &&
+    suggestionsEnabled &&
+    has('translations.suggest');
+
+  const canEditTranslation = (language: string) =>
+    (keyCreationOk &&
+      hasForLanguage(
+        'translations.edit',
+        language,
+        permissions?.translateLanguageIds
+      )) ||
+    assignedTaskType(language) === 'TRANSLATE';
+
+  const canEditState = (language: string) =>
+    (keyCreationOk &&
+      hasForLanguage(
+        'translations.state-edit',
+        language,
+        permissions?.stateChangeLanguageIds
+      )) ||
+    assignedTaskType(language) === 'REVIEW';
+
+  const getDisposition = (
+    language: string,
+    state: TranslationState | undefined
+  ): Disposition => {
+    const blockedByProtection =
+      state === 'REVIEWED' && reviewedProtected && !canEditState(language);
+    if (canEditTranslation(language) && !blockedByProtection) return 'save';
+    if (canSuggestTranslation(language)) return 'suggest';
+    return 'readonly';
+  };
+
+  const canDeleteOwnSuggestion =
+    suggestionsEnabled && has('translation-suggestions.own-access');
+
+  const canModerateSuggestions = (language: string) =>
+    suggestionsEnabled &&
+    hasForLanguage(
+      'translation-suggestions.manage',
+      language,
+      permissions?.suggestManageLanguageIds
+    );
+
+  const canReviewSuggestions = (language: string) =>
+    suggestionsEnabled &&
+    hasForLanguage(
+      'translations.state-edit',
+      language,
+      permissions?.stateChangeLanguageIds
+    );
+
+  // The schema declares userScopes required, but servers before it never send the field.
+  const asAccount =
+    permissions?.userScopes === undefined
+      ? undefined
+      : getComputedPermissions(
+          {
+            ...permissions,
+            scopes: permissions.userScopes,
+            userScopes: undefined,
+          },
+          keyData,
+          availableLanguages
+        );
+
+  const credentialBlocksSubmit =
+    asAccount === undefined
+      ? undefined
+      : !canSubmitForm && Boolean(asAccount.canSubmitForm);
+
+  const credentialBlocksTranslation = (
+    language: string,
+    state: TranslationState | undefined
+  ) =>
+    asAccount === undefined
+      ? undefined
+      : getDisposition(language, state) === 'readonly' &&
+        asAccount.getDisposition(language, state) !== 'readonly';
+
+  const accountHolds = (scopes: string[]) =>
+    asAccount === undefined
+      ? undefined
+      : scopes.every((scope) => isAuthorizedTo(scope, permissions?.userScopes));
+
+  return {
+    credentialBlocksSubmit,
+    credentialBlocksTranslation,
+    suggestionNeedsKey,
+    accountHolds,
+    suggestionsEnabled,
+    currentUserId: permissions?.userId,
+    canSuggestTranslation,
+    getDisposition,
+    canDeleteOwnSuggestion,
+    canModerateSuggestions,
+    canReviewSuggestions,
+    canEditTags,
+    canViewScreenshots,
+    canUploadScreenshots,
+    canDeleteScreenshots,
+    canSubmitForm,
+    canSendBigMeta,
+    canEditPlural,
+    canEditCharLimit,
+    canEditState,
+    canEditTranslation,
+  };
+};
+
+export const useComputedPermissions = (
+  permissions: ApiKeyPermissionsModel | undefined,
+  keyData: KeyWithTranslationsModel | undefined,
+  availableLanguages: LanguageModel[] | undefined
+) => {
+  return useMemo(
+    () => getComputedPermissions(permissions, keyData, availableLanguages),
+    [permissions, keyData, availableLanguages]
+  );
+};

@@ -1,0 +1,9 @@
+**/build
+**/dist
+./*/*/lib
+
+**/*.json
+
+**/*.generated.*
+**/*.md
+testapps/next/.next

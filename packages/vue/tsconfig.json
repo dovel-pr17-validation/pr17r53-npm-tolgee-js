@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2017",
+    "module": "esnext",
+    "rootDir": "src",
+    "sourceMap": true,
+    "declaration": true,
+    "outDir": "./lib",
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "lib": ["es2018", "es2020", "dom"],
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "jsx": "preserve",
+    "downlevelIteration": true,
+    "emitDeclarationOnly": true,
+    "types": ["node", "jest", "@types/jest"],
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "esModuleInterop": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules"]
+}

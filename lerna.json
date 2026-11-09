@@ -1,0 +1,20 @@
+{
+  "version": "7.2.1",
+  "npmClient": "pnpm",
+  "command": {
+    "publish": {
+      "conventionalCommits": true
+    },
+    "version": {
+      "message": "%s [skip ci]",
+      "conventionalCommits": true
+    }
+  },
+  "ignoreChanges": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/*.test.tsx",
+    "**/*.spec.tsx",
+    "**/package-lock.json"
+  ]
+}

@@ -1,0 +1,45 @@
+version: '3'
+services:
+  app:
+    container_name: tolgee_js_e2e_server
+    image: ${TOLGEE_IMAGE:-tolgee/tolgee:latest}
+    ports:
+      - 8202:8080
+      - 8092:8091
+    environment:
+      - tolgee.authentication.enabled=true
+      - tolgee.internal.controllerEnabled=true
+      - 'tolgee.screenshots-url=http://localhost:8202/screenshots'
+      - tolgee.authentication.needs-email-verification=true
+      - tolgee.authentication.registrations-allowed=true
+      - tolgee.authentication.create-demo-for-initial-user=false
+      - tolgee.internal.fake-emails-sent=true
+      - tolgee.authentication.initialPassword=admin
+      - tolgee.import.dir=/data/import-data
+      - tolgee.import.create-implicit-api-key=true
+      - tolgee.rate-limits.endpoint-limits=false
+      - spring.jpa.show-sql=true
+      - JAVA_TOOL_OPTIONS=-agentlib:jdwp=transport=dt_socket,address=*:8091,server=y,suspend=n
+    volumes:
+      - ./import-data:/data/import-data
+  e2e_app_vue-i18next_prod:
+    container_name: tolgee_js_e2e_serve_testapps_vue_i18next_prod
+    build: ../docker
+    volumes:
+      - '../:/data'
+    ports:
+      - 8119:3002
+    command: ['npm', 'run', 'serve']
+    working_dir: /data/testapps/vue-i18next
+  e2e_app_vue-i18next_dev:
+    container_name: tolgee_js_e2e_serve_testapps_vue_i18next_dev
+    build: ../docker
+    volumes:
+      - '../:/data'
+    ports:
+      - 8120:8080
+    command: ['npm', 'run', 'develop']
+    environment:
+      VUE_APP_TOLGEE_API_URL: http://localhost:8202
+      VUE_APP_TOLGEE_API_KEY: examples-admin-imported-project-implicit
+    working_dir: /data/testapps/vue-i18next
